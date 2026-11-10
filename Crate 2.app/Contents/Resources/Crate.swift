@@ -163,28 +163,59 @@ final class CrateApplication: NSObject, NSApplicationDelegate {
 
     private func waitForWebServer() {
         DispatchQueue.global(qos: .userInitiated).async {
-            let url = URL(string: "http://127.0.0.1:\(webPort)/ping")!
-            var ready = false
-            for _ in 0..<40 {
-                let semaphore = DispatchSemaphore(value: 0)
-                var succeeded = false
-                URLSession.shared.dataTask(with: url) { _, response, _ in
-                    succeeded = (response as? HTTPURLResponse)?.statusCode == 200
-                    semaphore.signal()
-                }.resume()
-                if semaphore.wait(timeout: .now() + 0.25) == .success, succeeded {
-                    ready = true
-                    break
-                }
+            let ready = (0..<80).contains { _ in
+                if Self.isWebServerReady() { return true }
+                Thread.sleep(forTimeInterval: 0.25)
+                return false
             }
             DispatchQueue.main.async {
                 if ready {
                     self.showWindow()
                 } else {
-                    self.showError("Crate's local server did not start.")
+                    self.showError("Crate's local server did not respond on 127.0.0.1:\(webPort). Check whether another process is using port \(webPort), then try again.")
                 }
             }
         }
+    }
+
+    private static func isWebServerReady() -> Bool {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+
+        var timeout = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(webPort).bigEndian
+        address.sin_addr = in_addr(s_addr: in_addr_t(INADDR_LOOPBACK).bigEndian)
+
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return false }
+
+        let request = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        let sent = request.withCString { pointer in
+            Darwin.send(descriptor, pointer, request.utf8.count, 0)
+        }
+        guard sent == request.utf8.count else { return false }
+
+        var response = [UInt8]()
+        var buffer = [UInt8](repeating: 0, count: 128)
+        while response.count < 512 {
+            let received = recv(descriptor, &buffer, buffer.count, 0)
+            guard received > 0 else { return false }
+            response.append(contentsOf: buffer[..<received])
+            if response.contains(10) { break }
+        }
+        guard let lineEnd = response.firstIndex(of: 10) else { return false }
+        return String(decoding: response[..<lineEnd], as: UTF8.self).hasPrefix("HTTP/1.1 200 ")
     }
 
     private func showWindow() {
@@ -200,6 +231,7 @@ final class CrateApplication: NSObject, NSApplicationDelegate {
 
         let webView = WKWebView(frame: window.contentView?.bounds ?? .zero)
         webView.autoresizingMask = [.width, .height]
+        webView.uiDelegate = self
         window.contentView?.addSubview(webView)
         webView.load(URLRequest(url: URL(string: "http://127.0.0.1:\(webPort)/")!))
 
@@ -214,6 +246,37 @@ final class CrateApplication: NSObject, NSApplicationDelegate {
         alert.informativeText = message
         alert.runModal()
         NSApp.terminate(nil)
+    }
+}
+
+extension CrateApplication: WKUIDelegate {
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        guard navigationAction.targetFrame == nil,
+              let url = navigationAction.request.url else {
+            return nil
+        }
+        let isSpotifyAuthorization = url.scheme == "https"
+            && url.host == "accounts.spotify.com"
+            && url.path == "/authorize"
+        let spotifyPath = url.path.split(separator: "/")
+        let isSpotifyContent = url.scheme == "https"
+            && url.host == "open.spotify.com"
+            && spotifyPath.count == 2
+            && ["album", "playlist"].contains(String(spotifyPath[0]))
+            && spotifyPath[1].allSatisfy(\.isASCII)
+            && spotifyPath[1].allSatisfy { $0.isLetter || $0.isNumber }
+        let isSpotifyStart = url.scheme == "http"
+            && url.host == "127.0.0.1"
+            && url.port == Int(webPort)
+            && url.path == "/spotify/start"
+        guard isSpotifyAuthorization || isSpotifyContent || isSpotifyStart else { return nil }
+        NSWorkspace.shared.open(url)
+        return nil
     }
 }
 

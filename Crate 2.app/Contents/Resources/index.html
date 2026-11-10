@@ -72,6 +72,50 @@
       width: 210px
     }
 
+    #spotify-control summary {
+      cursor: pointer;
+      padding: 6px 12px;
+      border: 1px solid var(--w2);
+      border-radius: 6px
+    }
+
+    #spotify-panel {
+      position: absolute;
+      z-index: 20;
+      top: calc(100% + 6px);
+      left: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      width: 340px;
+      padding: 12px;
+      border: 1px solid var(--w2);
+      border-radius: 6px;
+      background: #1a0f08;
+      box-shadow: 0 8px 20px #000b
+    }
+
+    #spotify-control {
+      position: relative
+    }
+
+    #spotify-id {
+      width: 190px;
+      cursor: text
+    }
+
+    #spotify-status {
+      flex-basis: 100%;
+      font-size: 12px
+    }
+
+    #spotify-redirect-help {
+      flex-basis: 100%;
+      font-size: 11px;
+      line-height: 1.4
+    }
+
     main {
       flex: 1;
       overflow: auto;
@@ -177,6 +221,29 @@
       text-align: center;
       padding: 8px;
       font-size: 12px
+    }
+
+    .sleeve-title {
+      position: relative;
+      z-index: 2;
+      overflow: hidden;
+      max-height: 100%;
+      padding: 4px;
+      background: #1a0f08b8;
+      border-radius: 4px
+    }
+
+    .spotify-link {
+      position: absolute;
+      z-index: 4;
+      bottom: 4px;
+      right: 4px;
+      padding: 2px 5px;
+      border-radius: 3px;
+      background: #1a0f08e8;
+      color: var(--cream);
+      font-size: 10px;
+      text-decoration: none
     }
 
     .mixtapes .rec:hover .disc {
@@ -313,6 +380,20 @@
       <option value="album">Albums</option>
       <option value="playlist">Playlists</option>
     </select>
+    <details id="spotify-control">
+      <summary>Spotify</summary>
+      <div id="spotify-panel">
+        <label for="spotify-id">Spotify Client ID</label>
+        <input id="spotify-id" type="text" autocomplete="off" spellcheck="false"
+          placeholder="From Spotify Developer Dashboard">
+        <button id="spotify-save">Save ID</button>
+        <button id="spotify-connect">Connect</button>
+        <button id="spotify-disconnect" hidden>Disconnect</button>
+        <span id="spotify-redirect-help">In Spotify Dashboard, add this Redirect URI:
+          http://127.0.0.1:47823/spotify/callback</span>
+        <span id="spotify-status">Not connected</span>
+      </div>
+    </details>
     <label><input type="checkbox" id="sh"> show hidden</label><span style="flex:1"></span><button id="rf">Refresh
       library</button>
   </header>
@@ -324,7 +405,7 @@
       turntable</span></footer>
   <script>
     const $ = s => document.querySelector(s), api = (p, o) => fetch(p, o).then(r => r.json());
-    let recs = [], flags = {}, tab = 0, secret = false, q = '', showHid = false, kind = 'all', nowKey = '', msg = '', view = [], dragKey = '', draggedAt = 0, lastPlankSize = 0, lastMixtapeWidth = 0;
+    let recs = [], spotifyRecs = [], flags = {}, tab = 0, secret = false, q = '', showHid = false, kind = 'all', nowKey = '', msg = '', view = [], dragKey = '', draggedAt = 0, lastPlankSize = 0, lastMixtapeWidth = 0, spotifyPollTimer = 0;
     const save = () => fetch('/api/flags', { method: 'POST', body: JSON.stringify(flags) });
     const fl = r => flags[r.key] || (flags[r.key] = {});
     function plankSize() {
@@ -363,10 +444,56 @@
           r.tracks.push({ id, tn, dn })
         }
         recs = [...m.values(), ...lib.pls.filter(([n]) => !(n.startsWith('Crate ') && n.includes('Now Playing'))).map(([n, id, f]) => ({ key: 'pl:' + id, kind: 'playlist', title: n, artist: 'Playlist', art: f, pid: id, tracks: [] }))];
-        msg = ''; render()
+        msg = ''; render(); if (tab === 1) loadSpotify()
       } catch (e) { msg = 'Could not load your library: ' + e.message; render() }
     }
+    async function refreshSpotifyStatus() {
+      const [status, settings] = await Promise.all([api('/api/spotify/status'), api('/api/spotify/settings')]);
+      $('#spotify-id').value = settings.client_id || '';
+      $('#spotify-connect').disabled = !status.configured;
+      $('#spotify-disconnect').hidden = !status.connected;
+      $('#spotify-status').textContent = status.pending ? 'Waiting for Spotify authorization…' : status.connected ? 'Connected' : status.configured ? 'Not connected' : 'Save your Client ID to connect';
+      if (status.pending && !spotifyPollTimer) watchSpotifyAuthorization();
+      return status
+    }
+    async function loadSpotify() {
+      try {
+        const status = await refreshSpotifyStatus();
+        if (!status.connected) { spotifyRecs = []; if (tab === 1) render(); return }
+        const library = await api('/api/spotify/library');
+        if (library.error) throw new Error(library.error);
+        spotifyRecs = [...(library.albums || []), ...(library.playlists || [])];
+        $('#spotify-status').textContent = `Connected · ${library.albums.length} albums · ${library.playlists.length} playlists`;
+        if (tab === 1) render()
+      } catch (e) {
+        $('#spotify-status').textContent = 'Spotify error: ' + e.message;
+        if (tab === 1) render()
+      }
+    }
+    function watchSpotifyAuthorization() {
+      clearInterval(spotifyPollTimer);
+      const timer = setInterval(async () => {
+        try {
+          const status = await api('/api/spotify/status');
+          if (!status.pending) {
+            clearInterval(timer); spotifyPollTimer = 0;
+            if (status.connected) loadSpotify();
+            else refreshSpotifyStatus().catch(e => { $('#spotify-status').textContent = 'Spotify error: ' + e.message })
+          }
+        } catch (e) {
+          clearInterval(timer); spotifyPollTimer = 0;
+          $('#spotify-status').textContent = 'Spotify error: ' + e.message
+        }
+      }, 1200);
+      spotifyPollTimer = timer;
+      setTimeout(() => { clearInterval(timer); if (spotifyPollTimer === timer) spotifyPollTimer = 0 }, 600000)
+    }
     async function play(r) {
+      if (r.source === 'spotify') {
+        $('#np').textContent = 'Opening ' + r.title + ' in Spotify…';
+        if (r.spotifyUrl) window.open(r.spotifyUrl, '_blank', 'noopener');
+        return
+      }
       let body; if (r.kind === 'playlist') body = { kind: 'pl', id: r.pid }; else { const albums = [{ album: r.title, ids: r.tracks.slice().sort((a, b) => (a.dn - b.dn) || (a.tn - b.tn)).map(t => t.id) }]; body = { kind: 'al', albums } }
       $('#np').textContent = 'Starting ' + r.title + ' in Apple Music…';
       try {
@@ -376,9 +503,13 @@
     }
     function rec(r) {
       const f = fl(r), d = document.createElement('div'); d.className = 'rec' + (nowKey === r.key ? ' playing' : '') + (f.h ? ' hid' : '');
-      d.dataset.key = r.key; d.draggable = tab !== 2;
+      d.dataset.key = r.key; d.draggable = tab !== 2 && r.source !== 'spotify';
       d.innerHTML = '<div class="disc"></div><div class="sleeve"></div><div class="tools"></div>';
-      const s = d.querySelector('.sleeve'); s.textContent = r.title; if (r.art) { s.dataset.pid = r.art; io.observe(s) }
+      const s = d.querySelector('.sleeve'), title = document.createElement('span'); title.className = 'sleeve-title'; title.textContent = r.title; s.append(title);
+      if (r.source === 'spotify') {
+        if (r.art && /^https:\/\/(?:i|mosaic)\.scdn\.co\/[A-Za-z0-9/_-]+$/.test(r.art)) s.style.backgroundImage = `url("${r.art}")`;
+        if (r.spotifyUrl) { const link = document.createElement('a'); link.className = 'spotify-link'; link.href = r.spotifyUrl; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = 'Spotify ↗'; link.onclick = e => e.stopPropagation(); s.append(link) }
+      } else if (r.art) { s.dataset.pid = r.art; io.observe(s) }
       if (tab === 2) {
         d.onmouseenter = () => {
           const row = d.parentElement;
@@ -391,7 +522,8 @@
       d.ondragend = () => { draggedAt = Date.now(); dragKey = '' };
       d.ondragover = e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' };
       d.ondrop = e => { e.preventDefault(); const from = e.dataTransfer.getData('text/plain') || dragKey; moveRecord(tab === 0 && !secret ? 'spotlight' : 'library', from, r.key); dragKey = ''; save(); render() };
-      [[f.s ? '★' : '☆', 'Spotlight', 's'], [f.h ? '🙈' : '👁', 'Hide', 'h'], ['📦', 'Secret box', 'x']].forEach(([l, t, k]) => {
+      const actions = r.source === 'spotify' ? [[f.h ? '🙈' : '👁', 'Hide', 'h'], ['📦', 'Secret box', 'x']] : [[f.s ? '★' : '☆', 'Spotlight', 's'], [f.h ? '🙈' : '👁', 'Hide', 'h'], ['📦', 'Secret box', 'x']];
+      actions.forEach(([l, t, k]) => {
         const b = document.createElement('button'); b.textContent = l; b.title = t;
         b.onclick = e => { e.stopPropagation(); f[k] = !f[k]; save(); render() }; d.querySelector('.tools').append(b)
       });
@@ -423,7 +555,8 @@
       lastMixtapeWidth = m.clientWidth;
       const size = plankSize(); lastPlankSize = size;
       if (msg) { m.innerHTML = '<div class="msg"></div>'; m.firstChild.textContent = msg; return }
-      let l = recs.filter(r => { const f = fl(r); return (tab === 2 ? r.kind === 'album' : kind == 'all' || r.kind == kind) && (secret ? f.x : !f.x && (showHid || !f.h) && (!q || (r.title + r.artist + (tab === 2 ? r.grouping || '' : '')).toLowerCase().includes(q))) });
+      const collection = tab === 1 || (secret && tab !== 2) ? recs.concat(spotifyRecs) : recs;
+      let l = collection.filter(r => { const f = fl(r); return (tab === 2 ? r.kind === 'album' : kind == 'all' || r.kind == kind) && (secret ? f.x : !f.x && (showHid || !f.h) && (!q || (r.title + r.artist + (tab === 2 ? r.grouping || '' : '')).toLowerCase().includes(q))) });
       if (secret || tab == 1) { l = ordered(l, 'library'); view = l; const c = document.createElement('div'); c.className = 'crate'; l.forEach(r => c.append(rec(r))); if (secret) m.append('🤫 The hidden box'); m.append(c); return }
       if (tab === 0) {
         l = ordered(l.filter(r => fl(r).s), 'spotlight'); view = l; if (!l.length) { m.innerHTML = '<div class="msg">Nothing on the wall yet.<br>Hover a record in the Library and press ☆.</div>'; return }
@@ -446,9 +579,30 @@
         layoutMixtapeRow(r)
       })
     }
-    $('#t0').onclick = () => { tab = 0; secret = false; render() }; $('#t1').onclick = () => { tab = 1; secret = false; render() }; $('#t2').onclick = () => { tab = 2; secret = false; render() };
+    $('#t0').onclick = () => { tab = 0; secret = false; render() }; $('#t1').onclick = () => { tab = 1; secret = false; render(); loadSpotify() }; $('#t2').onclick = () => { tab = 2; secret = false; render() };
     $('#q').oninput = e => { q = e.target.value.toLowerCase(); render() }; $('#k').onchange = e => { kind = e.target.value; render() };
-    $('#sh').onchange = e => { showHid = e.target.checked; render() }; $('#box').ondblclick = () => { secret = !secret; render() }; $('#rf').onclick = () => load(true);
+    $('#sh').onchange = e => { showHid = e.target.checked; render() }; $('#box').ondblclick = () => { secret = !secret; render() }; $('#rf').onclick = () => { load(true); if (tab === 1) loadSpotify() };
+    $('#spotify-save').onclick = async () => {
+      try {
+        const result = await api('/api/spotify/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: $('#spotify-id').value.trim() }) });
+        if (result.error) throw new Error(result.error);
+        $('#spotify-status').textContent = 'Client ID saved';
+        const status = await refreshSpotifyStatus();
+        if (!status.connected) { spotifyRecs = []; if (tab === 1) render() }
+      } catch (e) { $('#spotify-status').textContent = 'Spotify error: ' + e.message }
+    };
+    $('#spotify-connect').onclick = () => {
+      window.open('/spotify/start', '_blank');
+      $('#spotify-status').textContent = 'Waiting for Spotify authorization…';
+      watchSpotifyAuthorization()
+    };
+    $('#spotify-disconnect').onclick = async () => {
+      try {
+        const result = await api('/api/spotify/disconnect', { method: 'POST' });
+        if (result.error) throw new Error(result.error);
+        spotifyRecs = []; await refreshSpotifyStatus(); if (tab === 1) render()
+      } catch (e) { $('#spotify-status').textContent = 'Spotify error: ' + e.message }
+    };
     const cmd = c => fetch('/api/cmd?c=' + c); $('#pp').onclick = () => cmd('playpause'); $('#nx').onclick = () => cmd('next'); $('#pv').onclick = () => cmd('prev');
     new ResizeObserver(() => { if ((tab === 0 && !secret && plankSize() !== lastPlankSize) || (tab === 2 && $('#main').clientWidth !== lastMixtapeWidth)) render() }).observe($('#main'));
     async function poll() {
@@ -459,7 +613,9 @@
     (async () => {
       try {
         flags = await api('/api/flags'); if (!flags || typeof flags !== 'object' || Array.isArray(flags)) throw new Error('Invalid saved settings');
-        fetch('/ping?ui=1'); setInterval(() => fetch('/ping?ui=1'), 10000); setInterval(poll, 3000); load(false)
+        fetch('/ping?ui=1'); setInterval(() => fetch('/ping?ui=1'), 10000); setInterval(poll, 3000);
+        refreshSpotifyStatus().catch(e => { $('#spotify-status').textContent = 'Spotify error: ' + e.message });
+        load(false)
       } catch (e) { msg = 'Could not start Crate: ' + e.message; render() }
     })();
     window.addEventListener('error', e => { const m = $('#main'); if (m && m.childElementCount === 0) { msg = 'Crate could not start: ' + e.message; render() } });

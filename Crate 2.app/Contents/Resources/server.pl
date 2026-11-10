@@ -1,14 +1,65 @@
 use strict; use warnings; use IO::Socket::INET; use IO::Select; use JSON::PP; use File::Path 'make_path';
+use Digest::SHA qw(sha256); use MIME::Base64 qw(encode_base64); use URI::Escape qw(uri_escape_utf8 uri_unescape); use HTTP::Tiny;
 my($port,$res)=@ARGV; my $home=$ENV{HOME};
 my $cache="$home/Library/Caches/Crate"; my $sup="$home/Library/Application Support/Crate";
 make_path("$cache/art",$sup); $SIG{CHLD}='IGNORE'; $SIG{PIPE}='IGNORE';
+my $spotify_settings="$sup/spotify-settings.json"; my $spotify_auth="$sup/spotify-auth.json"; my $spotify_pending="$sup/spotify-pending.json";
+my $spotify_redirect="http://127.0.0.1:$port/spotify/callback";
 my $srv=IO::Socket::INET->new(LocalAddr=>'127.0.0.1',LocalPort=>$port,Listen=>30,ReuseAddr=>1,Proto=>'tcp') or die "port";
 my $sel=IO::Select->new($srv); my($last,$seen,$ui)=(time,0,0);
 sub slurp{my $f=shift; open(my $h,'<:raw',$f) or return undef; local $/; my $d=<$h>; close $h; $d}
 sub spit{my($f,$d)=@_; utf8::encode($d) if utf8::is_utf8($d); open(my $h,'>:raw',$f) or return; print $h $d; close $h}
+sub secure_spit{my($f,$d)=@_; my $old=umask 0077; my $ok=spit($f,$d); umask $old; return 0 unless $ok; return chmod 0600,$f}
+sub remove_optional{my($f)=@_; return 1 unless -e $f; return unlink $f}
+sub read_json{my($f)=@_; my $d=slurp($f); return undef unless defined $d; my $v=eval{decode_json($d)}; return $@?undef:$v}
+sub spotify_client_id{my $s=read_json($spotify_settings); return ref($s) eq 'HASH'?$s->{client_id}:undef}
+sub spotify_http{HTTP::Tiny->new(timeout=>30,verify_SSL=>1,agent=>'Crate Spotify Library/1.0')}
+sub spotify_api_error{my($response)=@_; my $data=eval{decode_json($response->{content}//'')}; my $message=ref($data) eq 'HASH' && ref($data->{error}) eq 'HASH'?$data->{error}{message}:undef; $message||="Spotify returned HTTP $response->{status}"; $message.=" (retry after $response->{headers}{'retry-after'} seconds)" if $response->{status}==429 && $response->{headers}{'retry-after'}; return $message}
+sub spotify_access_token{
+ my $auth=read_json($spotify_auth); return(undef,'Spotify is not connected') unless ref($auth) eq 'HASH' && $auth->{refresh_token};
+ return($auth->{access_token},undef) if $auth->{access_token} && ($auth->{expires_at}//0)>time+60;
+ my $client_id=spotify_client_id(); return(undef,'Save your Spotify Client ID first') unless $client_id;
+ my $response=spotify_http()->post_form('https://accounts.spotify.com/api/token',{grant_type=>'refresh_token',refresh_token=>$auth->{refresh_token},client_id=>$client_id});
+ return(undef,'Could not refresh Spotify authorization: '.spotify_api_error($response)) unless $response->{success};
+ my $token=eval{decode_json($response->{content})}; return(undef,'Spotify returned an invalid token response') unless ref($token) eq 'HASH' && $token->{access_token};
+ $auth->{access_token}=$token->{access_token}; $auth->{expires_at}=time+($token->{expires_in}//3600); $auth->{refresh_token}=$token->{refresh_token} if $token->{refresh_token};
+ return(undef,'Could not securely save Spotify authorization') unless secure_spit($spotify_auth,encode_json($auth));
+ return($auth->{access_token},undef)
+}
+sub spotify_all_pages{
+ my($start,$token)=@_; my @items; my %seen; my $url=$start;
+ while(defined $url && length $url){
+  return(undef,'Spotify pagination returned an invalid URL') unless $url=~m{\Ahttps://api\.spotify\.com/v1/me/(?:albums|playlists)(?:\?.*)?\z};
+  return(undef,'Spotify pagination repeated a page') if $seen{$url}++;
+  my $response=spotify_http()->get($url,{headers=>{Authorization=>"Bearer $token"}});
+  return(undef,spotify_api_error($response)) unless $response->{success};
+  my $page=eval{decode_json($response->{content})}; return(undef,'Spotify returned invalid library data') unless ref($page) eq 'HASH' && ref($page->{items}) eq 'ARRAY';
+  push @items,@{$page->{items}}; return(undef,'Spotify library is too large to load safely') if @items>20000;
+  $url=$page->{next}
+ }
+ return(\@items,undef)
+}
+sub spotify_library{
+ my($token)=@_; my($saved,$error)=spotify_all_pages('https://api.spotify.com/v1/me/albums?limit=50',$token); return(undef,$error) unless $saved;
+ my($playlists,$playlist_error)=spotify_all_pages('https://api.spotify.com/v1/me/playlists?limit=50',$token); return(undef,$playlist_error) unless $playlists;
+ my(@albums,@playlist_records);
+ for my $item(@$saved){
+  my $a=ref($item) eq 'HASH'?$item->{album}:undef; next unless ref($a) eq 'HASH' && $a->{id};
+  push @albums,{key=>"spotify:album:$a->{id}",source=>'spotify',kind=>'album',title=>$a->{name}//'Unknown Album',artist=>(ref($a->{artists}) eq 'ARRAY' && @{$a->{artists}}?($a->{artists}[0]{name}//'Unknown Artist'):'Unknown Artist'),art=>(ref($a->{images}) eq 'ARRAY' && @{$a->{images}}?$a->{images}[0]{url}:''),spotifyUrl=>((ref($a->{external_urls}) eq 'HASH'?$a->{external_urls}{spotify}:undef)||"https://open.spotify.com/album/$a->{id}")}
+ }
+ for my $p(@$playlists){
+  next unless ref($p) eq 'HASH' && $p->{id};
+  push @playlist_records,{key=>"spotify:playlist:$p->{id}",source=>'spotify',kind=>'playlist',title=>$p->{name}//'Unknown Playlist',artist=>(ref($p->{owner}) eq 'HASH'?($p->{owner}{display_name}//'Playlist'):'Playlist'),art=>(ref($p->{images}) eq 'ARRAY' && @{$p->{images}}?$p->{images}[0]{url}:''),spotifyUrl=>((ref($p->{external_urls}) eq 'HASH'?$p->{external_urls}{spotify}:undef)||"https://open.spotify.com/playlist/$p->{id}")}
+ }
+ return({albums=>\@albums,playlists=>\@playlist_records},undef)
+}
+sub query_params{my($q)=@_; my %p; for my $part(split /&/,$q){my($k,$v)=split /=/,$part,2;$p{uri_unescape($k//'')}=uri_unescape($v//'')} return\%p}
+sub random_b64url{my($bytes)=@_; open(my $f,'<:raw','/dev/urandom') or die 'Secure random source unavailable'; my $data=''; my $n=read($f,$data,$bytes); close $f; die 'Could not read secure random data' unless defined($n) && $n==$bytes; my $encoded=encode_base64($data,''); $encoded=~tr!+/!-_!; $encoded=~s/=+\z//; return $encoded}
+sub spotify_callback_page{my($message)=@_; $message=~s/&/&amp;/g; $message=~s/</&lt;/g; $message=~s/>/&gt;/g; return '<!doctype html><meta charset="utf-8"><title>Crate Spotify</title><p>'.$message.'</p><p>You can close this tab and return to Crate.</p>'}
 sub resp{my($c,$code,$type,$body)=@_; my $cc=$type=~/^image/?'max-age=86400':'no-store';
   utf8::encode($body) if utf8::is_utf8($body);
   print $c "HTTP/1.1 $code\r\nContent-Type: $type\r\nContent-Length: ".length($body)."\r\nCache-Control: $cc\r\nConnection: close\r\n\r\n$body"}
+sub redirect_resp{my($c,$url)=@_; print $c "HTTP/1.1 302 Found\r\nLocation: $url\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"}
 sub osa{my($lang,$script,@a)=@_; my $sock=IO::Socket::INET->new(PeerAddr=>'127.0.0.1',PeerPort=>47824,Proto=>'tcp',Timeout=>120) or return "ERROR: Crate automation bridge unavailable: $!";
   $sock->autoflush(1); print $sock encode_json({lang=>$lang,script=>$script,args=>\@a})."\n" or return "ERROR: Could not contact Crate automation bridge";
   my $line=<$sock>; close $sock; return "ERROR: Crate automation bridge returned no response" unless defined $line;
@@ -143,7 +194,67 @@ on run argv
 end run
 AS
 sub handle{my($c,$m,$path,$q,$body)=@_;
- if($path eq '/api/library'){my $f="$cache/library-v2.json"; my $d=($q!~/refresh/)?slurp($f):undef;
+ if($path eq '/api/spotify/settings'){
+  if($m eq 'POST'){
+   my $request=eval{decode_json($body)};
+   if($@ || ref($request) ne 'HASH' || !defined($request->{client_id}) || $request->{client_id}!~/\A[A-Za-z0-9]{10,128}\z/){resp($c,'400 Bad Request','application/json',encode_json({error=>'Enter a valid Spotify Client ID'}))}
+   else{my $previous=spotify_client_id();
+    if(defined($previous) && $previous ne $request->{client_id} && (!remove_optional($spotify_auth) || !remove_optional($spotify_pending))){resp($c,'500 Internal Server Error','application/json',encode_json({error=>'Could not remove the previous Spotify authorization'}))}
+    elsif(!secure_spit($spotify_settings,encode_json({client_id=>$request->{client_id}}))){resp($c,'500 Internal Server Error','application/json',encode_json({error=>'Could not save Spotify settings securely'}))}
+    else{resp($c,'200 OK','application/json',encode_json({client_id=>$request->{client_id}}))}
+   }
+  }else{resp($c,'200 OK','application/json',encode_json({client_id=>spotify_client_id()//''}))}
+ }
+ elsif($path eq '/api/spotify/status'){
+  my $auth=read_json($spotify_auth); my $pending=read_json($spotify_pending);
+  if(ref($pending) eq 'HASH' && time-($pending->{created_at}//0)>600){unlink $spotify_pending;$pending=undef}
+  resp($c,'200 OK','application/json',encode_json({configured=>spotify_client_id()?1:0,connected=>(ref($auth) eq 'HASH' && $auth->{refresh_token})?1:0,pending=>ref($pending) eq 'HASH'?1:0}))
+ }
+ elsif($path eq '/spotify/start'){
+  my $client_id=spotify_client_id();
+  if(!$client_id){resp($c,'400 Bad Request','text/plain; charset=utf-8','Save your Spotify Client ID in Crate first.')}
+  else{my $state=eval{random_b64url(32)}; my $verifier=eval{random_b64url(64)};
+   if($@){resp($c,'500 Internal Server Error','text/plain; charset=utf-8',"Could not start secure Spotify authorization: $@")}
+   else{my $challenge=encode_base64(sha256($verifier),'');$challenge=~tr!+/!-_!;$challenge=~s/=+\z//;
+    if(!secure_spit($spotify_pending,encode_json({state=>$state,verifier=>$verifier,client_id=>$client_id,created_at=>time}))){
+     resp($c,'500 Internal Server Error','text/plain; charset=utf-8','Could not save Spotify authorization state securely.')
+    }else{
+    my $scope='user-library-read playlist-read-private playlist-read-collaborative';
+    my @values=($client_id,'code',$spotify_redirect,'S256',$challenge,$state,$scope);
+    my @pairs; for my $i(0..$#values){push @pairs,uri_escape_utf8(('client_id','response_type','redirect_uri','code_challenge_method','code_challenge','state','scope')[$i]).'='.uri_escape_utf8($values[$i])}
+    my $url='https://accounts.spotify.com/authorize?'.join('&',@pairs);
+    redirect_resp($c,$url)}
+   }
+  }
+ }
+ elsif($path eq '/spotify/callback'){
+  my $params=query_params($q); my $pending=read_json($spotify_pending);
+  if(ref($pending) ne 'HASH' || !defined($params->{state}) || $params->{state} ne ($pending->{state}//'')){resp($c,'400 Bad Request','text/html; charset=utf-8',spotify_callback_page('Spotify authorization could not be verified. Return to Crate and try again.'))}
+  elsif(defined $params->{error}){unlink $spotify_pending;resp($c,'200 OK','text/html; charset=utf-8',spotify_callback_page('Spotify authorization was cancelled. Return to Crate and try again.'))}
+  elsif(!defined($params->{code}) || time-($pending->{created_at}//0)>600){unlink $spotify_pending;resp($c,'400 Bad Request','text/html; charset=utf-8',spotify_callback_page('Spotify authorization expired. Return to Crate and try again.'))}
+  else{unlink $spotify_pending;
+   my $response=spotify_http()->post_form('https://accounts.spotify.com/api/token',{grant_type=>'authorization_code',code=>$params->{code},redirect_uri=>$spotify_redirect,client_id=>$pending->{client_id},code_verifier=>$pending->{verifier}});
+   if(!$response->{success}){resp($c,'400 Bad Request','text/html; charset=utf-8',spotify_callback_page('Spotify connection failed: '.spotify_api_error($response)))}
+   else{my $token=eval{decode_json($response->{content})};
+    if(ref($token) ne 'HASH' || !$token->{access_token} || !$token->{refresh_token}){resp($c,'500 Internal Server Error','text/html; charset=utf-8',spotify_callback_page('Spotify returned an invalid token response.'))}
+    else{$token->{expires_at}=time+($token->{expires_in}//3600);
+     if(!secure_spit($spotify_auth,encode_json($token))){resp($c,'500 Internal Server Error','text/html; charset=utf-8',spotify_callback_page('Crate could not securely save the Spotify authorization.'))}
+     else{resp($c,'200 OK','text/html; charset=utf-8',spotify_callback_page('Spotify is connected to Crate.'))}
+    }
+   }
+  }
+ }
+ elsif($path eq '/api/spotify/disconnect'){
+  if(!remove_optional($spotify_auth) || !remove_optional($spotify_pending) || !remove_optional("$cache/spotify-library.json")){resp($c,'500 Internal Server Error','application/json',encode_json({error=>'Could not remove all Spotify connection data'}))}
+  else{resp($c,'200 OK','application/json',encode_json({ok=>1}))}
+ }
+ elsif($path eq '/api/spotify/library'){
+  my($token,$error)=spotify_access_token();
+  if($error){resp($c,'401 Unauthorized','application/json',encode_json({error=>$error}))}
+  else{my($data,$library_error)=spotify_library($token); if($library_error){resp($c,'502 Bad Gateway','application/json',encode_json({error=>"Could not load Spotify library: $library_error"}))}
+   else{resp($c,'200 OK','application/json',encode_json($data))}}
+ }
+ elsif($path eq '/api/library'){my $f="$cache/library-v2.json"; my $d=($q!~/refresh/)?slurp($f):undef;
    if(!$d){$d=osa('AppleScript',$LIB); if($d!~/^\{/){$d=encode_json({error=>"Could not read Apple Music through Crate's automation permission: ".substr($d,0,300)})} else{spit($f,$d)}}
    resp($c,'200 OK','application/json',$d)}
  elsif($path eq '/api/art'){my($pid)=$q=~/pid=([0-9A-Fa-f]+)/; return resp($c,'400 Bad','text/plain','x') unless $pid;
