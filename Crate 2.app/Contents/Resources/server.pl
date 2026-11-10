@@ -39,6 +39,8 @@ on run argv
   set trackJSON to trackJSON & (disc number of t as text) & ","
   set trackJSON to trackJSON & (year of t as text) & ","
   set fieldJSON to my boolJSON(compilation of t)
+  set trackJSON to trackJSON & fieldJSON & ","
+  set fieldJSON to my quoteJSON(grouping of t)
   set trackJSON to trackJSON & fieldJSON & "]"
  end repeat
  end tell
@@ -141,7 +143,7 @@ on run argv
 end run
 AS
 sub handle{my($c,$m,$path,$q,$body)=@_;
- if($path eq '/api/library'){my $f="$cache/library.json"; my $d=($q!~/refresh/)?slurp($f):undef;
+ if($path eq '/api/library'){my $f="$cache/library-v2.json"; my $d=($q!~/refresh/)?slurp($f):undef;
    if(!$d){$d=osa('AppleScript',$LIB); if($d!~/^\{/){$d=encode_json({error=>"Could not read Apple Music through Crate's automation permission: ".substr($d,0,300)})} else{spit($f,$d)}}
    resp($c,'200 OK','application/json',$d)}
  elsif($path eq '/api/art'){my($pid)=$q=~/pid=([0-9A-Fa-f]+)/; return resp($c,'400 Bad','text/plain','x') unless $pid;

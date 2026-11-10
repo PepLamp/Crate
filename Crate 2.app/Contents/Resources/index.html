@@ -1,89 +1,469 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Crate</title>
-<style>
-:root{--w2:#5a3a22;--cream:#f2e6d0;--amber:#e0a43a}*{box-sizing:border-box}html,body{height:100%;margin:0}
-body{background:repeating-linear-gradient(90deg,#2a1a0f 0 70px,#2f1d11 70px 140px);color:var(--cream);font:14px Georgia,serif;display:flex;flex-direction:column}
-header{display:flex;gap:12px;align-items:center;padding:12px 20px;background:#1a0f08cc;border-bottom:2px solid var(--w2);flex-wrap:wrap}
-h1{margin:0;font-size:24px;letter-spacing:4px;color:var(--amber)}
-button,input[type=search],select{font:inherit;background:#2a1a0f;color:var(--cream);border:1px solid var(--w2);border-radius:6px;padding:6px 12px;cursor:pointer}
-button.on{background:var(--amber);color:#1a0f08}input[type=search]{cursor:text;width:210px}
-main{flex:1;overflow:auto;padding:24px 30px}.shelf{margin-bottom:34px}.row{display:flex;gap:26px;align-items:flex-end;min-height:170px;padding:0 10px}
-.plank{height:16px;border-radius:2px;background:linear-gradient(#7a4f2e,#4a2d18);box-shadow:0 10px 14px #0009}
-.rec{position:relative;z-index:1;width:150px;flex:none;cursor:grab}.rec:active{cursor:grabbing}.rec.playing{z-index:5}.rec:hover{z-index:10}
-.sleeve{width:150px;height:150px;background:#6b4a2e center/cover;position:relative;z-index:2;box-shadow:0 4px 10px #000a;display:flex;align-items:center;justify-content:center;text-align:center;padding:8px;font-size:12px}
-.disc{position:absolute;top:6px;left:6px;width:138px;height:138px;border-radius:50%;z-index:0;transition:transform .3s;background:radial-gradient(circle,var(--amber) 0 16%,#111 17% 30%,#1c1c1c 31% 33%,#0d0d0d 34%)}
-.rec:hover .disc{transform:translateX(52px) rotate(40deg)}.rec.playing .disc{animation:spin 2.5s linear infinite}
-@keyframes spin{from{transform:translateX(52px) rotate(0)}to{transform:translateX(52px) rotate(360deg)}}
-.meta{margin-top:6px;font-size:12px;line-height:1.3}.meta b,.meta span{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.tools{position:absolute;top:2px;right:2px;z-index:3;display:none;gap:2px}.rec:hover .tools{display:flex}.tools button{padding:1px 5px;font-size:12px}
-.crate{display:grid;grid-template-columns:repeat(auto-fill,150px);gap:22px 20px;padding:18px;border:6px solid var(--w2);border-radius:6px;background:#1a0f0899;box-shadow:inset 0 0 40px #000}
-.hid{opacity:.35}#box{position:fixed;right:16px;bottom:70px;font-size:26px;opacity:.2;cursor:pointer;user-select:none}#box:hover{opacity:.7}
-footer{display:flex;gap:12px;align-items:center;padding:10px 20px;background:#120a05;border-top:2px solid var(--w2)}#np{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.msg{text-align:center;margin-top:12vh;line-height:1.8}</style></head><body>
-<header><h1>CRATE</h1><button id="t0" class="on">Spotlight</button><button id="t1">Library</button>
-<input type="search" id="q" placeholder="Dig through the crates…"><select id="k"><option value="all">Albums + playlists</option><option value="album">Albums</option><option value="playlist">Playlists</option></select>
-<label><input type="checkbox" id="sh"> show hidden</label><span style="flex:1"></span><button id="rf">Refresh library</button></header>
-<main id="main"><div class="msg">Loading your crates…</div></main><div id="box" title="">📦</div>
-<footer><button id="pv">⏮</button><button id="pp">⏯</button><button id="nx">⏭</button><span id="np">Nothing on the turntable</span></footer>
-<script>
-const $=s=>document.querySelector(s),api=(p,o)=>fetch(p,o).then(r=>r.json());
-let recs=[],flags={},tab=0,secret=false,q='',showHid=false,kind='all',nowKey='',msg='',view=[],dragKey='',draggedAt=0;
-const save=()=>fetch('/api/flags',{method:'POST',body:JSON.stringify(flags)});
-const fl=r=>flags[r.key]||(flags[r.key]={});
-const collator=new Intl.Collator(undefined,{sensitivity:'base',numeric:true});
-const byTitle=(a,b)=>collator.compare(a.title,b.title)||collator.compare(a.artist,b.artist)||a.key.localeCompare(b.key);
-function screenOrder(screen){return flags._orders&&Array.isArray(flags._orders[screen])?flags._orders[screen]:[]}
-function ordered(items,screen){const order=screenOrder(screen);if(!order.length)return items.sort(byTitle);
- const pos=new Map(order.map((key,i)=>[key,i]));return items.sort((a,b)=>(pos.has(a.key)?pos.get(a.key):Infinity)-(pos.has(b.key)?pos.get(b.key):Infinity)||byTitle(a,b))}
-function moveRecord(screen,from,to){const records=screen==='spotlight'?recs.filter(r=>fl(r).s):recs;
- const keys=[...new Set([...screenOrder(screen).filter(k=>records.some(r=>r.key===k)),...records.slice().sort(byTitle).map(r=>r.key)])];
- const a=keys.indexOf(from),b=keys.indexOf(to);if(a<0||b<0||a===b)return;
- const [moved]=keys.splice(a,1);keys.splice(keys.indexOf(to),0,moved);flags._orders=flags._orders||{};flags._orders[screen]=keys}
-function updatePlaying(){document.querySelectorAll('.rec[data-key]').forEach(d=>d.classList.toggle('playing',d.dataset.key===nowKey))}
-const Q=[];let act=0;function pump(){while(act<3&&Q.length){const[el,pid]=Q.shift();act++;const im=new Image();im.onload=()=>{el.style.backgroundImage=`url(/api/art?pid=${pid})`;el.textContent='';dn()};im.onerror=dn;im.src='/api/art?pid='+pid}}
-function dn(){act--;pump()}
-const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){io.unobserve(e.target);Q.push([e.target,e.target.dataset.pid]);pump()}}));
-async function load(refresh){msg='Reading your Apple Music library… (the first time can take a minute)';render();
- try{const lib=await api('/api/library'+(refresh?'?refresh=1':''));if(lib.error)throw new Error(lib.error);
-  const m=new Map();
-  for(const[id,name,album,aa,ar,tn,dn,yr,cp]of lib.tracks){if(!album)continue;
-   const artist=aa||(cp?'Various Artists':ar)||'Unknown Artist';const key=(album+'\u0001'+artist).toLowerCase();
-   let r=m.get(key);if(!r){r={key,kind:'album',title:album,artist,art:id,tracks:[]};m.set(key,r)}r.tracks.push({id,tn,dn})}
-  recs=[...m.values(),...lib.pls.filter(([n])=>!(n.startsWith('Crate ')&&n.includes('Now Playing'))).map(([n,id,f])=>({key:'pl:'+id,kind:'playlist',title:n,artist:'Playlist',art:f,pid:id,tracks:[]}))];
-  msg='';render()
- }catch(e){msg='Could not load your library: '+e.message;render()}}
-async function play(r){let body;if(r.kind==='playlist')body={kind:'pl',id:r.pid};else{const albums=[{album:r.title,ids:r.tracks.slice().sort((a,b)=>(a.dn-b.dn)||(a.tn-b.tn)).map(t=>t.id)}];body={kind:'al',albums}}
-  $('#np').textContent='Starting '+r.title+' in Apple Music…';
-  try{const response=await fetch('/api/play',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),result=await response.json();
-   if(!response.ok||result.error)throw new Error(result.error||'Apple Music could not start playback');
-  }catch(e){$('#np').textContent='Could not play '+r.title+': '+e.message}}
-function rec(r){const f=fl(r),d=document.createElement('div');d.className='rec'+(nowKey===r.key?' playing':'')+(f.h?' hid':'');
-  d.dataset.key=r.key;d.draggable=true;
-  d.innerHTML='<div class="disc"></div><div class="sleeve"></div><div class="tools"></div>';
-  const s=d.querySelector('.sleeve');s.textContent=r.title;if(r.art){s.dataset.pid=r.art;io.observe(s)}
-  d.title=r.artist+' — '+r.title+' (drag to rearrange; click to play)';
-  d.ondragstart=e=>{dragKey=r.key;e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',r.key)};
-  d.ondragend=()=>{draggedAt=Date.now();dragKey=''};
-  d.ondragover=e=>{e.preventDefault();e.dataTransfer.dropEffect='move'};
-  d.ondrop=e=>{e.preventDefault();const from=e.dataTransfer.getData('text/plain')||dragKey;moveRecord(tab===0&&!secret?'spotlight':'library',from,r.key);dragKey='';save();render()};
-  [[f.s?'★':'☆','Spotlight','s'],[f.h?'🙈':'👁','Hide','h'],['📦','Secret box','x']].forEach(([l,t,k])=>{const b=document.createElement('button');b.textContent=l;b.title=t;
-   b.onclick=e=>{e.stopPropagation();f[k]=!f[k];save();render()};d.querySelector('.tools').append(b)});
- d.onclick=()=>{if(Date.now()-draggedAt>500)play(r)};return d}
-function render(){const m=$('#main');m.innerHTML='';$('#t0').classList.toggle('on',tab==0);$('#t1').classList.toggle('on',tab==1);
- if(msg){m.innerHTML='<div class="msg"></div>';m.firstChild.textContent=msg;return}
- let l=recs.filter(r=>{const f=fl(r);return(kind=='all'||r.kind==kind)&&(secret?f.x:!f.x&&(showHid||!f.h)&&(!q||(r.title+r.artist).toLowerCase().includes(q)))});
- if(secret||tab==1){l=ordered(l,'library');view=l;const c=document.createElement('div');c.className='crate';l.forEach(r=>c.append(rec(r)));if(secret)m.append('🤫 The hidden box');m.append(c);return}
- l=ordered(l.filter(r=>fl(r).s),'spotlight');view=l;if(!l.length){m.innerHTML='<div class="msg">Nothing on the wall yet.<br>Hover a record in the Library and press ☆.</div>';return}
- for(let i=0;i<l.length;i+=6){const s=document.createElement('div');s.className='shelf',r=document.createElement('div');r.className='row';
-  l.slice(i,i+6).forEach(x=>r.append(rec(x)));s.append(r,Object.assign(document.createElement('div'),{className:'plank'}));m.append(s)}}
-$('#t0').onclick=()=>{tab=0;secret=false;render()};$('#t1').onclick=()=>{tab=1;secret=false;render()};
-$('#q').oninput=e=>{q=e.target.value.toLowerCase();render()};$('#k').onchange=e=>{kind=e.target.value;render()};
-$('#sh').onchange=e=>{showHid=e.target.checked;render()};$('#box').ondblclick=()=>{secret=!secret;render()};$('#rf').onclick=()=>load(true);
-const cmd=c=>fetch('/api/cmd?c='+c);$('#pp').onclick=()=>cmd('playpause');$('#nx').onclick=()=>cmd('next');$('#pv').onclick=()=>cmd('prev');
-async function poll(){const t=await fetch('/api/now').then(r=>r.text()).catch(()=>'');const[s,n,a,al,aa]=t.split('|');
- if(n)$('#np').textContent=`${a} — ${n}${s==='paused'?' (paused)':''}`;else if(!nowKey)$('#np').textContent='Nothing on the turntable';
- const k=n&&s==='playing'?((al+'\u0001'+(aa||a)).toLowerCase()):'';const nk=recs.some(r=>r.key===k)?k:'';if(nk!==nowKey){nowKey=nk;updatePlaying()}}
-(async()=>{try{flags=await api('/api/flags');if(!flags||typeof flags!=='object'||Array.isArray(flags))throw new Error('Invalid saved settings');
-  fetch('/ping?ui=1');setInterval(()=>fetch('/ping?ui=1'),10000);setInterval(poll,3000);load(false)
- }catch(e){msg='Could not start Crate: '+e.message;render()}})();
-window.addEventListener('error',e=>{const m=$('#main');if(m&&m.childElementCount===0){msg='Crate could not start: '+e.message;render()}});
-</script></body></html>
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <title>Crate</title>
+  <style>
+    :root {
+      --w2: #5a3a22;
+      --cream: #f2e6d0;
+      --amber: #e0a43a;
+      --record-width: 150px;
+      --record-gap: 26px;
+      --main-pad: 30px;
+      --row-inset: 10px
+    }
+
+    * {
+      box-sizing: border-box
+    }
+
+    html,
+    body {
+      height: 100%;
+      margin: 0
+    }
+
+    body {
+      background: repeating-linear-gradient(90deg, #2a1a0f 0 70px, #2f1d11 70px 140px);
+      color: var(--cream);
+      font: 14px Georgia, serif;
+      display: flex;
+      flex-direction: column
+    }
+
+    header {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 20px;
+      background: #1a0f08cc;
+      border-bottom: 2px solid var(--w2);
+      flex-wrap: wrap
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: 4px;
+      color: var(--amber)
+    }
+
+    button,
+    input[type=search],
+    select {
+      font: inherit;
+      background: #2a1a0f;
+      color: var(--cream);
+      border: 1px solid var(--w2);
+      border-radius: 6px;
+      padding: 6px 12px;
+      cursor: pointer
+    }
+
+    button.on {
+      background: var(--amber);
+      color: #1a0f08
+    }
+
+    input[type=search] {
+      cursor: text;
+      width: 210px
+    }
+
+    main {
+      flex: 1;
+      overflow: auto;
+      padding: 24px var(--main-pad)
+    }
+
+    .shelf {
+      margin-bottom: 34px
+    }
+
+    .row {
+      display: flex;
+      gap: var(--record-gap);
+      justify-content: center;
+      align-items: flex-end;
+      min-height: 170px;
+      padding: 0 var(--row-inset)
+    }
+
+    .group-shelf {
+      overflow-x: hidden;
+      overflow-y: hidden;
+    }
+
+    .group-track {
+      width: 100%;
+      min-width: 100%
+    }
+
+    .row.grouped {
+      width: 100%;
+      min-width: 100%;
+      justify-content: flex-start;
+      gap: 0;
+      padding: 10px var(--row-inset) 14px
+    }
+
+    .row.grouped .rec {
+      margin-left: calc(var(--stack-step) - var(--record-width));
+      transition: margin .28s ease
+    }
+
+    .row.grouped .rec:first-child {
+      margin-left: 0
+    }
+
+    .plank {
+      height: 16px;
+      border-radius: 2px;
+      background: linear-gradient(#7a4f2e, #4a2d18);
+      box-shadow: 0 10px 14px #0009
+    }
+
+    .group-track>.plank {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 24px;
+      color: var(--cream);
+      font-size: 12px;
+      text-shadow: 0 1px 2px #1a0f08
+    }
+
+    .rec {
+      position: relative;
+      z-index: 1;
+      width: var(--record-width);
+      flex: none;
+      cursor: grab
+    }
+
+    .rec:active {
+      cursor: grabbing
+    }
+
+    .rec.playing {
+      z-index: 5
+    }
+
+    .rec:hover {
+      z-index: 10
+    }
+
+    .mixtapes .rec.focus-vinyl {
+      z-index: auto
+    }
+
+    .mixtapes .row.grouped .rec:hover,
+    .mixtapes .row.grouped .rec.playing {
+      z-index: auto
+    }
+
+    .sleeve {
+      width: var(--record-width);
+      height: 150px;
+      background: #6b4a2e center/cover;
+      position: relative;
+      z-index: 2;
+      box-shadow: 0 4px 10px #000a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 8px;
+      font-size: 12px
+    }
+
+    .mixtapes .rec:hover .disc {
+      transform: none
+    }
+
+    .mixtapes .rec.playing .disc {
+      animation: none
+    }
+
+    .disc {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      width: 138px;
+      height: 138px;
+      border-radius: 50%;
+      z-index: 0;
+      transition: transform .3s;
+      background: radial-gradient(circle, var(--amber) 0 16%, #111 17% 30%, #1c1c1c 31% 33%, #0d0d0d 34%)
+    }
+
+    .rec:hover .disc {
+      transform: translateX(52px) rotate(40deg)
+    }
+
+    .rec.playing .disc {
+      animation: spin 2.5s linear infinite
+    }
+
+    @keyframes spin {
+      from {
+        transform: translateX(52px) rotate(0)
+      }
+
+      to {
+        transform: translateX(52px) rotate(360deg)
+      }
+    }
+
+    .meta {
+      margin-top: 6px;
+      font-size: 12px;
+      line-height: 1.3
+    }
+
+    .meta b,
+    .meta span {
+      display: block;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis
+    }
+
+    .tools {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      z-index: 3;
+      display: none;
+      gap: 2px
+    }
+
+    .rec:hover .tools {
+      display: flex
+    }
+
+    .tools button {
+      padding: 1px 5px;
+      font-size: 12px
+    }
+
+    .crate {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-content: flex-start;
+      gap: 22px 20px;
+      padding: 18px;
+      border: 6px solid var(--w2);
+      border-radius: 6px;
+      background: #1a0f0899;
+      box-shadow: inset 0 0 40px #000
+    }
+
+    .hid {
+      opacity: .35
+    }
+
+    #box {
+      position: fixed;
+      right: 16px;
+      bottom: 70px;
+      font-size: 26px;
+      opacity: .2;
+      cursor: pointer;
+      user-select: none
+    }
+
+    #box:hover {
+      opacity: .7
+    }
+
+    footer {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 20px;
+      background: #120a05;
+      border-top: 2px solid var(--w2)
+    }
+
+    #np {
+      flex: 1;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis
+    }
+
+    .msg {
+      text-align: center;
+      margin-top: 12vh;
+      line-height: 1.8
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>CRATE</h1><button id="t0" class="on">Spotlight</button><button id="t1">Library</button><button
+      id="t2">Mixtapes</button>
+    <input type="search" id="q" placeholder="Dig through the crates…"><select id="k">
+      <option value="all">Albums + playlists</option>
+      <option value="album">Albums</option>
+      <option value="playlist">Playlists</option>
+    </select>
+    <label><input type="checkbox" id="sh"> show hidden</label><span style="flex:1"></span><button id="rf">Refresh
+      library</button>
+  </header>
+  <main id="main">
+    <div class="msg">Loading your crates…</div>
+  </main>
+  <div id="box" title="">📦</div>
+  <footer><button id="pv">⏮</button><button id="pp">⏯</button><button id="nx">⏭</button><span id="np">Nothing on the
+      turntable</span></footer>
+  <script>
+    const $ = s => document.querySelector(s), api = (p, o) => fetch(p, o).then(r => r.json());
+    let recs = [], flags = {}, tab = 0, secret = false, q = '', showHid = false, kind = 'all', nowKey = '', msg = '', view = [], dragKey = '', draggedAt = 0, lastPlankSize = 0, lastMixtapeWidth = 0;
+    const save = () => fetch('/api/flags', { method: 'POST', body: JSON.stringify(flags) });
+    const fl = r => flags[r.key] || (flags[r.key] = {});
+    function plankSize() {
+      const styles = getComputedStyle(document.documentElement), main = $('#main');
+      const width = main.clientWidth - 2 * parseFloat(styles.getPropertyValue('--main-pad')) - 2 * parseFloat(styles.getPropertyValue('--row-inset'));
+      const record = parseFloat(styles.getPropertyValue('--record-width')), gap = parseFloat(styles.getPropertyValue('--record-gap'));
+      return Math.max(1, Math.floor((width + gap) / (record + gap)))
+    }
+    const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+    const byTitle = (a, b) => collator.compare(a.title, b.title) || collator.compare(a.artist, b.artist) || a.key.localeCompare(b.key);
+    function screenOrder(screen) { return flags._orders && Array.isArray(flags._orders[screen]) ? flags._orders[screen] : [] }
+    function ordered(items, screen) {
+      const order = screenOrder(screen); if (!order.length) return items.sort(byTitle);
+      const pos = new Map(order.map((key, i) => [key, i])); return items.sort((a, b) => (pos.has(a.key) ? pos.get(a.key) : Infinity) - (pos.has(b.key) ? pos.get(b.key) : Infinity) || byTitle(a, b))
+    }
+    function moveRecord(screen, from, to) {
+      const records = screen === 'spotlight' ? recs.filter(r => fl(r).s) : recs;
+      const keys = [...new Set([...screenOrder(screen).filter(k => records.some(r => r.key === k)), ...records.slice().sort(byTitle).map(r => r.key)])];
+      const a = keys.indexOf(from), b = keys.indexOf(to); if (a < 0 || b < 0 || a === b) return;
+      const [moved] = keys.splice(a, 1); keys.splice(keys.indexOf(to), 0, moved); flags._orders = flags._orders || {}; flags._orders[screen] = keys
+    }
+    function updatePlaying() { document.querySelectorAll('.rec[data-key]').forEach(d => d.classList.toggle('playing', d.dataset.key === nowKey)) }
+    const Q = []; let act = 0; function pump() { while (act < 3 && Q.length) { const [el, pid] = Q.shift(); act++; const im = new Image(); im.onload = () => { el.style.backgroundImage = `url(/api/art?pid=${pid})`; el.textContent = ''; dn() }; im.onerror = dn; im.src = '/api/art?pid=' + pid } }
+    function dn() { act--; pump() }
+    const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { io.unobserve(e.target); Q.push([e.target, e.target.dataset.pid]); pump() } }));
+    async function load(refresh) {
+      msg = 'Reading your Apple Music library… (the first time can take a minute)'; render();
+      try {
+        const lib = await api('/api/library' + (refresh ? '?refresh=1' : '')); if (lib.error) throw new Error(lib.error);
+        const m = new Map();
+        for (const [id, name, album, aa, ar, tn, dn, yr, cp, grouping] of lib.tracks) {
+          if (!album) continue;
+          const artist = aa || (cp ? 'Various Artists' : ar) || 'Unknown Artist'; const key = (album + '\u0001' + artist).toLowerCase();
+          let r = m.get(key); if (!r) { r = { key, kind: 'album', title: album, artist, art: id, grouping: (grouping || '').trim(), tracks: [] }; m.set(key, r) }
+          else if (!r.grouping && grouping) r.grouping = grouping.trim();
+          r.tracks.push({ id, tn, dn })
+        }
+        recs = [...m.values(), ...lib.pls.filter(([n]) => !(n.startsWith('Crate ') && n.includes('Now Playing'))).map(([n, id, f]) => ({ key: 'pl:' + id, kind: 'playlist', title: n, artist: 'Playlist', art: f, pid: id, tracks: [] }))];
+        msg = ''; render()
+      } catch (e) { msg = 'Could not load your library: ' + e.message; render() }
+    }
+    async function play(r) {
+      let body; if (r.kind === 'playlist') body = { kind: 'pl', id: r.pid }; else { const albums = [{ album: r.title, ids: r.tracks.slice().sort((a, b) => (a.dn - b.dn) || (a.tn - b.tn)).map(t => t.id) }]; body = { kind: 'al', albums } }
+      $('#np').textContent = 'Starting ' + r.title + ' in Apple Music…';
+      try {
+        const response = await fetch('/api/play', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), result = await response.json();
+        if (!response.ok || result.error) throw new Error(result.error || 'Apple Music could not start playback');
+      } catch (e) { $('#np').textContent = 'Could not play ' + r.title + ': ' + e.message }
+    }
+    function rec(r) {
+      const f = fl(r), d = document.createElement('div'); d.className = 'rec' + (nowKey === r.key ? ' playing' : '') + (f.h ? ' hid' : '');
+      d.dataset.key = r.key; d.draggable = tab !== 2;
+      d.innerHTML = '<div class="disc"></div><div class="sleeve"></div><div class="tools"></div>';
+      const s = d.querySelector('.sleeve'); s.textContent = r.title; if (r.art) { s.dataset.pid = r.art; io.observe(s) }
+      if (tab === 2) {
+        d.onmouseenter = () => {
+          const row = d.parentElement;
+          row.querySelector('.focus-vinyl')?.classList.remove('focus-vinyl');
+          d.classList.add('focus-vinyl');
+          layoutMixtapeRow(row, [...row.children].indexOf(d));
+        };
+      }
+      d.ondragstart = e => { dragKey = r.key; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', r.key) };
+      d.ondragend = () => { draggedAt = Date.now(); dragKey = '' };
+      d.ondragover = e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' };
+      d.ondrop = e => { e.preventDefault(); const from = e.dataTransfer.getData('text/plain') || dragKey; moveRecord(tab === 0 && !secret ? 'spotlight' : 'library', from, r.key); dragKey = ''; save(); render() };
+      [[f.s ? '★' : '☆', 'Spotlight', 's'], [f.h ? '🙈' : '👁', 'Hide', 'h'], ['📦', 'Secret box', 'x']].forEach(([l, t, k]) => {
+        const b = document.createElement('button'); b.textContent = l; b.title = t;
+        b.onclick = e => { e.stopPropagation(); f[k] = !f[k]; save(); render() }; d.querySelector('.tools').append(b)
+      });
+      d.onclick = () => { if (Date.now() - draggedAt > 500) play(r) }; return d
+    }
+    function layoutMixtapeRow(row, hoveredIndex = -1) {
+      const records = [...row.children], count = records.length;
+      if (!count) return;
+      const styles = getComputedStyle(document.documentElement);
+      const available = row.clientWidth - 2 * parseFloat(styles.getPropertyValue('--row-inset'));
+      const width = parseFloat(styles.getPropertyValue('--record-width'));
+      const maxSpan = Math.max(0, available - width);
+      const span = count < 2 ? 0 : Math.min(maxSpan, (hoveredIndex < 0 ? 176 : 186) * (count - 1));
+      const steps = Array(Math.max(0, count - 1)).fill(count < 2 ? 0 : span / (count - 1));
+      if (hoveredIndex >= 0 && steps.length) {
+        const near = [hoveredIndex - 1, hoveredIndex].filter(i => i >= 0 && i < steps.length);
+        const far = steps.map((_, i) => i).filter(i => !near.includes(i));
+        const nearStep = Math.min(186, span / near.length);
+        near.forEach(i => steps[i] = nearStep);
+        const farStep = far.length ? (span - nearStep * near.length) / far.length : 0;
+        far.forEach(i => steps[i] = farStep);
+      }
+      records.forEach((record, i) => {
+        record.style.marginLeft = i === 0 ? '0px' : `${steps[i - 1] - width}px`;
+      });
+    }
+    function render() {
+      const m = $('#main'); m.innerHTML = ''; m.classList.toggle('mixtapes', tab === 2); $('#t0').classList.toggle('on', tab == 0); $('#t1').classList.toggle('on', tab == 1); $('#t2').classList.toggle('on', tab == 2); $('#k').hidden = tab === 2;
+      lastMixtapeWidth = m.clientWidth;
+      const size = plankSize(); lastPlankSize = size;
+      if (msg) { m.innerHTML = '<div class="msg"></div>'; m.firstChild.textContent = msg; return }
+      let l = recs.filter(r => { const f = fl(r); return (tab === 2 ? r.kind === 'album' : kind == 'all' || r.kind == kind) && (secret ? f.x : !f.x && (showHid || !f.h) && (!q || (r.title + r.artist + (tab === 2 ? r.grouping || '' : '')).toLowerCase().includes(q))) });
+      if (secret || tab == 1) { l = ordered(l, 'library'); view = l; const c = document.createElement('div'); c.className = 'crate'; l.forEach(r => c.append(rec(r))); if (secret) m.append('🤫 The hidden box'); m.append(c); return }
+      if (tab === 0) {
+        l = ordered(l.filter(r => fl(r).s), 'spotlight'); view = l; if (!l.length) { m.innerHTML = '<div class="msg">Nothing on the wall yet.<br>Hover a record in the Library and press ☆.</div>'; return }
+        for (let i = 0; i < l.length; i += size) {
+          const s = document.createElement('div'); s.className = 'shelf', r = document.createElement('div'); r.className = 'row';
+          l.slice(i, i + size).forEach(x => r.append(rec(x))); s.append(r, Object.assign(document.createElement('div'), { className: 'plank' })); m.append(s)
+        } return
+      }
+      const groups = new Map();
+      l.forEach(r => { const group = r.grouping || ''; if (!groups.has(group)) groups.set(group, []); groups.get(group).push(r) });
+      const sortedGroups = [...groups].sort(([a], [b]) => !a ? (!b ? 0 : 1) : !b ? -1 : collator.compare(a, b));
+      view = sortedGroups.flatMap(([, albums]) => albums.sort(byTitle));
+      if (!view.length) { m.innerHTML = '<div class="msg">No albums to show in Mixtapes.</div>'; return }
+      sortedGroups.forEach(([group, albums]) => {
+        const s = document.createElement('div'); s.className = 'shelf group-shelf'; s.setAttribute('aria-label', `Grouping: ${group || 'No grouping'}. Hover over an album to make space for it.`);
+        const track = document.createElement('div'); track.className = 'group-track'; const r = document.createElement('div'); r.className = 'row grouped';
+        const plank = Object.assign(document.createElement('div'), { className: 'plank', textContent: group || ' ' });
+        albums.sort(byTitle).forEach(x => r.append(rec(x))); track.append(r, plank); s.append(track); m.append(s);
+        r.onmouseleave = () => { r.querySelector('.focus-vinyl')?.classList.remove('focus-vinyl'); layoutMixtapeRow(r) };
+        layoutMixtapeRow(r)
+      })
+    }
+    $('#t0').onclick = () => { tab = 0; secret = false; render() }; $('#t1').onclick = () => { tab = 1; secret = false; render() }; $('#t2').onclick = () => { tab = 2; secret = false; render() };
+    $('#q').oninput = e => { q = e.target.value.toLowerCase(); render() }; $('#k').onchange = e => { kind = e.target.value; render() };
+    $('#sh').onchange = e => { showHid = e.target.checked; render() }; $('#box').ondblclick = () => { secret = !secret; render() }; $('#rf').onclick = () => load(true);
+    const cmd = c => fetch('/api/cmd?c=' + c); $('#pp').onclick = () => cmd('playpause'); $('#nx').onclick = () => cmd('next'); $('#pv').onclick = () => cmd('prev');
+    new ResizeObserver(() => { if ((tab === 0 && !secret && plankSize() !== lastPlankSize) || (tab === 2 && $('#main').clientWidth !== lastMixtapeWidth)) render() }).observe($('#main'));
+    async function poll() {
+      const t = await fetch('/api/now').then(r => r.text()).catch(() => ''); const [s, n, a, al, aa] = t.split('|');
+      if (n) $('#np').textContent = `${a} — ${n}${s === 'paused' ? ' (paused)' : ''}`; else if (!nowKey) $('#np').textContent = 'Nothing on the turntable';
+      const k = n && s === 'playing' ? ((al + '\u0001' + (aa || a)).toLowerCase()) : ''; const nk = recs.some(r => r.key === k) ? k : ''; if (nk !== nowKey) { nowKey = nk; updatePlaying() }
+    }
+    (async () => {
+      try {
+        flags = await api('/api/flags'); if (!flags || typeof flags !== 'object' || Array.isArray(flags)) throw new Error('Invalid saved settings');
+        fetch('/ping?ui=1'); setInterval(() => fetch('/ping?ui=1'), 10000); setInterval(poll, 3000); load(false)
+      } catch (e) { msg = 'Could not start Crate: ' + e.message; render() }
+    })();
+    window.addEventListener('error', e => { const m = $('#main'); if (m && m.childElementCount === 0) { msg = 'Crate could not start: ' + e.message; render() } });
+  </script>
+</body>
+
+</html>
