@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Crate</string>
+<key>CFBundleDisplayName</key><string>Crate</string>
+<key>CFBundleIdentifier</key><string>app.crate.player</string>
+<key>CFBundleExecutable</key><string>Crate</string>
+<key>CFBundleIconFile</key><string>Crate</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>2</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+<key>NSAppleEventsUsageDescription</key><string>Crate needs permission to read your Music library, album artwork, and playlists, and to start playback in Music.</string>
+</dict></plist>
